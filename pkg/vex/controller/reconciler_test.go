@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kubescape/kubevuln/pkg/vex/storage"
 	"github.com/kubescape/kubevuln/pkg/vexsource/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -57,10 +58,13 @@ func TestVEXSourceReconciler_Reconcile(t *testing.T) {
 
 	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1beta1.VEXSource{}).WithObjects(vexSource).Build()
 
+	store := storage.NewVEXStore()
 	r := &VEXSourceReconciler{
-		Client:     client,
-		Scheme:     scheme,
-		HTTPClient: mockServer.Client(),
+		Client:            client,
+		Scheme:            scheme,
+		HTTPClient:        mockServer.Client(),
+		VEXStore:          store,
+		AllowInsecureHTTP: true,
 	}
 
 	req := reconcile.Request{
@@ -111,9 +115,10 @@ func TestVEXSourceReconciler_HTTPError(t *testing.T) {
 	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1beta1.VEXSource{}).WithObjects(vexSource).Build()
 
 	r := &VEXSourceReconciler{
-		Client:     client,
-		Scheme:     scheme,
-		HTTPClient: http.DefaultClient,
+		Client:            client,
+		Scheme:            scheme,
+		HTTPClient:        http.DefaultClient,
+		AllowInsecureHTTP: true,
 	}
 
 	req := reconcile.Request{
@@ -137,5 +142,49 @@ func TestVEXSourceReconciler_HTTPError(t *testing.T) {
 
 	if len(updated.Status.Conditions) == 0 || updated.Status.Conditions[0].Status != metav1.ConditionFalse || updated.Status.Conditions[0].Reason != "HTTPFetchError" {
 		t.Errorf("expected Synced=False with HTTPFetchError, got %v", updated.Status.Conditions)
+	}
+}
+
+func TestVEXSourceReconciler_SSRFBlocked(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = v1beta1.AddToScheme(scheme)
+
+	vexSource := &v1beta1.VEXSource{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-vex",
+			Namespace: "default",
+		},
+		Spec: v1beta1.VEXSourceSpec{
+			URL:    "http://127.0.0.1/forbidden", // Blocked HTTP / Loopback
+			Format: v1beta1.VEXFormatOpenVEX,
+		},
+	}
+
+	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1beta1.VEXSource{}).WithObjects(vexSource).Build()
+
+	r := &VEXSourceReconciler{
+		Client:            client,
+		Scheme:            scheme,
+		HTTPClient:        http.DefaultClient,
+		AllowInsecureHTTP: false, // Enforce SSRF blocking
+	}
+
+	req := reconcile.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      "test-vex",
+			Namespace: "default",
+		},
+	}
+
+	_, err := r.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	updated := &v1beta1.VEXSource{}
+	_ = client.Get(context.Background(), req.NamespacedName, updated)
+
+	if len(updated.Status.Conditions) == 0 || updated.Status.Conditions[0].Reason != "SSRFProtectionBlocked" {
+		t.Errorf("expected Synced=False with SSRFProtectionBlocked, got %v", updated.Status.Conditions)
 	}
 }

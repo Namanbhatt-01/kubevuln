@@ -30,6 +30,7 @@ import (
 	"github.com/kubescape/kubevuln/internal/metrics"
 	"github.com/kubescape/kubevuln/internal/tools"
 	"github.com/kubescape/kubevuln/pkg/vex/join"
+	"github.com/kubescape/kubevuln/pkg/vex/storage"
 	"github.com/kubescape/storage/pkg/apis/softwarecomposition/v1beta1"
 	"github.com/kubescape/storage/pkg/registry/file/dynamicpathdetector"
 	"go.opentelemetry.io/otel"
@@ -62,6 +63,7 @@ type ScanService struct {
 	metrics           *metrics.Metrics
 	eventRecorder     record.EventRecorder
 	vexJoinEngine     *join.JoinEngine
+	vexStore          *storage.VEXStore
 }
 
 // SetMetrics attaches an optional Metrics instance to the service. It is not
@@ -82,6 +84,11 @@ func (s *ScanService) SetEventRecorder(r record.EventRecorder) {
 // SetVEXJoinEngine attaches an optional JoinEngine to the service for external VEX feed suppression.
 func (s *ScanService) SetVEXJoinEngine(engine *join.JoinEngine) {
 	s.vexJoinEngine = engine
+}
+
+// SetVEXStore attaches a thread-safe VEXStore to dynamically pull ingested VEX statements.
+func (s *ScanService) SetVEXStore(store *storage.VEXStore) {
+	s.vexStore = store
 }
 
 var _ ports.ScanService = (*ScanService)(nil)
@@ -941,9 +948,17 @@ func (s *ScanService) applyExceptionsToManifest(ctx context.Context, cve domain.
 		s.metrics.ExceptionsDegradedCounter.Add(ctx, 1)
 	}
 	s.recordExceptionsExpired(ctx, stats)
+	joinEngine := s.vexJoinEngine
+	if joinEngine == nil && s.vexStore != nil {
+		stmts := s.vexStore.GetAllStatements()
+		if len(stmts) > 0 {
+			joinEngine = join.NewJoinEngine(stmts)
+		}
+	}
+
 	if err != nil && !degraded {
 		logger.L().Ctx(ctx).Warning("failed to get CVE exceptions for filtering", helpers.Error(err))
-		if s.vexJoinEngine == nil {
+		if joinEngine == nil {
 			return cve, false
 		}
 		// Continue with an empty SecurityException set so VEX still runs
@@ -952,7 +967,7 @@ func (s *ScanService) applyExceptionsToManifest(ctx context.Context, cve domain.
 	if s.metrics != nil {
 		s.metrics.ExceptionsActiveGauge.Record(ctx, int64(len(exceptions)))
 	}
-	if len(exceptions) == 0 && s.vexJoinEngine == nil {
+	if len(exceptions) == 0 && joinEngine == nil {
 		return cve, !degraded
 	}
 	filtered := cve
@@ -964,8 +979,8 @@ func (s *ScanService) applyExceptionsToManifest(ctx context.Context, cve domain.
 	}
 	docCopy := cve.Content.DeepCopy()
 	matchedBySource := v1.ApplySecurityExceptions(docCopy, exceptions, s.eventRecorder)
-	if s.vexJoinEngine != nil {
-		vexCounts := s.vexJoinEngine.ApplyVEXFilter(docCopy)
+	if joinEngine != nil {
+		vexCounts := joinEngine.ApplyVEXFilter(docCopy)
 		for k, v := range vexCounts {
 			matchedBySource[k] += v
 		}

@@ -202,24 +202,33 @@ func (p *CSAFStreamParser) Parse(r io.Reader, emit func(VEXStatement) error) err
 	var bufferedStatements []VEXStatement
 	productMap := make(map[string]string) // product_id -> PURL
 
-	// Helper for parsing branches
+	// Helper for parsing branches (CSAF 2.0 specification)
 	var parseBranches func(branches []json.RawMessage)
 	parseBranches = func(branches []json.RawMessage) {
 		for _, bRaw := range branches {
 			var b struct {
-				Product struct {
+				Product *struct {
 					ProductID string `json:"product_id"`
 					ProductIdentificationHelper struct {
 						PURL string `json:"purl"`
 					} `json:"product_identification_helper"`
-				} `json:"product"`
-				Branches []json.RawMessage `json:"branches"`
+				} `json:"product,omitempty"`
+				FullProductName *struct {
+					ProductID string `json:"product_id"`
+					ProductIdentificationHelper struct {
+						PURL string `json:"purl"`
+					} `json:"product_identification_helper"`
+				} `json:"full_product_name,omitempty"`
+				Branches []json.RawMessage `json:"branches,omitempty"`
 			}
 			if err := json.Unmarshal(bRaw, &b); err != nil {
 				continue
 			}
-			if b.Product.ProductID != "" && b.Product.ProductIdentificationHelper.PURL != "" {
+			if b.Product != nil && b.Product.ProductID != "" && b.Product.ProductIdentificationHelper.PURL != "" {
 				productMap[b.Product.ProductID] = b.Product.ProductIdentificationHelper.PURL
+			}
+			if b.FullProductName != nil && b.FullProductName.ProductID != "" && b.FullProductName.ProductIdentificationHelper.PURL != "" {
+				productMap[b.FullProductName.ProductID] = b.FullProductName.ProductIdentificationHelper.PURL
 			}
 			if len(b.Branches) > 0 {
 				parseBranches(b.Branches)

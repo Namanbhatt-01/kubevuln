@@ -30,12 +30,16 @@ func (cq *CooldownQueue) Push(key string, action func()) {
 		timer.Stop()
 	}
 
-	cq.timers[key] = time.AfterFunc(cq.cooldown, func() {
+	var t *time.Timer
+	t = time.AfterFunc(cq.cooldown, func() {
 		cq.mu.Lock()
-		delete(cq.timers, key)
+		if cq.timers[key] == t {
+			delete(cq.timers, key)
+		}
 		cq.mu.Unlock()
 		action()
 	})
+	cq.timers[key] = t
 }
 
 // Stop cancels all active timers in the queue.

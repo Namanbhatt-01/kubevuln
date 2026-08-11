@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	vexnet "github.com/kubescape/kubevuln/pkg/vex/net"
 	"github.com/kubescape/kubevuln/pkg/vex/parser"
 	"github.com/kubescape/kubevuln/pkg/vex/storage"
 	"github.com/kubescape/kubevuln/pkg/vexsource/v1beta1"
@@ -22,8 +23,10 @@ import (
 // VEXSourceReconciler reconciles a VEXSource object to fetch and ingest VEX feeds.
 type VEXSourceReconciler struct {
 	client.Client
-	Scheme     *runtime.Scheme
-	HTTPClient *http.Client
+	Scheme            *runtime.Scheme
+	HTTPClient        *http.Client
+	VEXStore          *storage.VEXStore
+	AllowInsecureHTTP bool // For local test environments
 }
 
 // SetupWithManager wires the reconciler up to a controller manager.
@@ -57,11 +60,19 @@ func (r *VEXSourceReconciler) Reconcile(ctx context.Context, req reconcile.Reque
 		}
 	}()
 
+	// Validate URL against SSRF / private IP targets
+	if !r.AllowInsecureHTTP {
+		if _, err := vexnet.ValidateVEXURL(vexSource.Spec.URL); err != nil {
+			r.setStatusFailed(vexSource, "SSRFProtectionBlocked", err.Error())
+			return reconcile.Result{}, nil // Block SSRF targets without retrying
+		}
+	}
+
 	// 2. Fetch the feed (HTTP) with a context timeout
 	fetchCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 
-	//nolint:gosec // URL is provided by cluster admin via CRD configuration.
+	//nolint:gosec // URL is validated against SSRF private ranges above.
 	httpReq, err := http.NewRequestWithContext(fetchCtx, http.MethodGet, vexSource.Spec.URL, nil)
 	if err != nil {
 		r.setStatusFailed(vexSource, "InvalidURL", err.Error())
@@ -70,7 +81,7 @@ func (r *VEXSourceReconciler) Reconcile(ctx context.Context, req reconcile.Reque
 
 	httpClient := r.HTTPClient
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 2 * time.Minute}
+		httpClient = vexnet.NewSecureHTTPClient(2 * time.Minute)
 	}
 
 	resp, err := httpClient.Do(httpReq)
@@ -108,10 +119,11 @@ func (r *VEXSourceReconciler) Reconcile(ctx context.Context, req reconcile.Reque
 		return reconcile.Result{}, nil
 	}
 
-	// 4. Persist statements via conflict-safe writer
+	// 4. Persist statements via conflict-safe writer to VEXStore
 	err = storage.PersistVEXStatements(ctx, func(ctx context.Context) error {
-		// In a real integration, this would write to the OpenVulnerabilityExchangeContainer storage API.
-		// For the scope of the Reconciler itself, we execute the callback provided to the storage layer.
+		if r.VEXStore != nil {
+			r.VEXStore.SetStatements(req.String(), parsedStatements)
+		}
 		return nil
 	})
 	if err != nil {

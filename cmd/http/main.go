@@ -33,6 +33,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	
 	vexcontroller "github.com/kubescape/kubevuln/pkg/vex/controller"
+	vexstorage "github.com/kubescape/kubevuln/pkg/vex/storage"
 	"github.com/kubescape/kubevuln/pkg/vexsource/v1beta1"
 	ctrl "sigs.k8s.io/controller-runtime"
 )
@@ -153,7 +154,10 @@ func main() {
 	} else {
 		relevancyProvider = adapters.NewMockRelevancyAdapter()
 	}
+	vexStore := vexstorage.NewVEXStore()
+
 	service := services.NewScanService(sbomAdapter, storage, cveAdapter, storage, platform, relevancyProvider, c.Storage, c.VexGeneration, !c.NodeSbomGeneration, c.StoreFilteredSbom, c.PartialRelevancy)
+	service.SetVEXStore(vexStore)
 	if eventRecorder != nil {
 		service.SetEventRecorder(eventRecorder)
 	}
@@ -228,8 +232,9 @@ func main() {
 	}
 
 	reconciler := &vexcontroller.VEXSourceReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		VEXStore: vexStore,
 	}
 	if err = reconciler.SetupWithManager(mgr); err != nil {
 		logger.L().Ctx(ctx).Fatal("unable to create controller", helpers.Error(err))
